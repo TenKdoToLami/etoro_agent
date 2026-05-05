@@ -82,36 +82,41 @@ class TradingLogic:
             f"Target: {target_symbol} (instrumentID={target_instrument_id})"
         )
 
-        # ---- Close positions that don't match the target ----
-        positions_to_close = []
-        for pos in manual_positions:
-            if pos.get("instrumentID") != target_instrument_id:
-                positions_to_close.append(pos.get("positionID"))
+        # ---- Identify positions to close ----
+        positions_to_close = [p for p in manual_positions if p.get("instrumentID") != target_instrument_id]
+        is_target_already_owned = any(p.get("instrumentID") == target_instrument_id for p in manual_positions)
 
-            for pos_to_close in manual_positions:
-                if pos_to_close.get("instrumentID") != target_instrument_id:
-                    pid = pos_to_close.get("positionID")
-                    iid = pos_to_close.get("instrumentID")
-                    logger.info(f"  Closing positionID {pid} (InstrumentID {iid})")
-                    self.etoro.close_position(pid, iid)
-                    time.sleep(4)  # rate-limit spacing
+        if not positions_to_close and is_target_already_owned:
+            logger.info(f"Target asset {target_symbol} already owned and no other positions to close. Holding.")
+            return
 
-            logger.info(
-                "Waiting 60 s for eToro PnL cache to refresh after closes…"
-            )
+        if positions_to_close:
+            logger.info(f"State changed — closing {len(positions_to_close)} position(s).")
+            for pos in positions_to_close:
+                pid = pos.get("positionID")
+                iid = pos.get("instrumentID")
+                logger.info(f"  Closing positionID {pid} (InstrumentID {iid})")
+                self.etoro.close_position(pid, iid)
+                time.sleep(2) # Short gap between individual close commands
+
+            logger.info("Waiting 60 s for eToro PnL cache to refresh after closes…")
             time.sleep(60)
 
-            # Refresh cash balance
+            # Refresh cash balance after waiting
             pnl = self.etoro.get_pnl()
             available_cash = pnl.get("clientPortfolio", {}).get("credit", 0.0)
+            
+            # Re-deduct pending orders after refresh
+            orders_for_open = pnl.get("clientPortfolio", {}).get("ordersForOpen", [])
+            for order in orders_for_open:
+                if order.get("mirrorID") == 0:
+                    available_cash -= order.get("amount", 0.0)
 
         # ---- Open new position with surplus cash ----
         investable_cash = available_cash - SAFETY_CASH
 
         if investable_cash > MIN_POSITION_VALUE:
-            logger.info(
-                f"Opening position: {target_symbol}  |  amount=${investable_cash:.2f}"
-            )
+            logger.info(f"Opening position: {target_symbol}  |  amount=${investable_cash:.2f}")
             self.etoro.open_position(
                 instrument_id=target_instrument_id,
                 amount=investable_cash,
