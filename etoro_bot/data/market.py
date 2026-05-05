@@ -19,56 +19,73 @@ class DataManager:
                     high REAL,
                     low REAL,
                     close REAL,
-                    volume INTEGER
+                    volume INTEGER,
+                    vix REAL,
+                    yield_curve REAL
                 )
             ''')
+            # Migration: Check if vix column exists, if not add it
+            cursor = conn.cursor()
+            cursor.execute("PRAGMA table_info(spy_daily)")
+            columns = [info[1] for info in cursor.fetchall()]
+            if 'vix' not in columns:
+                conn.execute('ALTER TABLE spy_daily ADD COLUMN vix REAL DEFAULT 15.0')
+                conn.execute('ALTER TABLE spy_daily ADD COLUMN yield_curve REAL DEFAULT 0.0')
             conn.commit()
 
     def is_market_open_today(self):
-        # We'll use yfinance to see if there is data for today.
-        # Alternatively, pandas_market_calendars could be used if installed.
-        # For a simple check, we see if today is a weekday and not a major holiday by trying to fetch today's data.
         now = datetime.now(tz.gettz("America/New_York"))
         if now.weekday() >= 5: # Saturday or Sunday
             return False
             
-        # Check if there's any data for today
         spy = yf.Ticker("SPY")
         today_str = now.strftime('%Y-%m-%d')
-        # Fetch data for today to see if it exists (market open/recently closed)
         df = spy.history(period="1d")
         if df.empty:
             return False
             
-        # If the last available date in the df matches today's date in NY, market was/is open today
         last_date = df.index[-1].strftime('%Y-%m-%d')
         return last_date == today_str
 
     def update_historical_data(self):
-        """Fetches up to 1 year of data to populate the database."""
-        spy = yf.Ticker("SPY")
-        df = spy.history(period="1y")
+        """Fetches missing data including VIX and Yields."""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT MAX(date) FROM spy_daily")
+            last_date = cursor.fetchone()[0]
+        
+        period = "7d" if last_date else "1y"
+        
+        from ..utils.logger import setup_logger
+        logger = setup_logger("market_data")
+        logger.info(f"Updating historical data (SPY, VIX, TNX) for period: {period}")
+
+        spy_df = yf.Ticker("SPY").history(period=period)
+        vix_df = yf.Ticker("^VIX").history(period=period)
+        tnx_df = yf.Ticker("^TNX").history(period=period) # 10Y Yield
         
         with sqlite3.connect(self.db_path) as conn:
-            for date, row in df.iterrows():
+            for date, row in spy_df.iterrows():
                 date_str = date.strftime('%Y-%m-%d')
+                
+                # Align VIX and TNX
+                vix_val = vix_df.loc[date]['Close'] if date in vix_df.index else 15.0
+                tnx_val = tnx_df.loc[date]['Close'] if date in tnx_df.index else 0.0
+                
                 conn.execute('''
-                    INSERT OR REPLACE INTO spy_daily (date, open, high, low, close, volume)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                ''', (date_str, row['Open'], row['High'], row['Low'], row['Close'], int(row['Volume'])))
+                    INSERT OR REPLACE INTO spy_daily (date, open, high, low, close, volume, vix, yield_curve)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (date_str, row['Open'], row['High'], row['Low'], row['Close'], int(row['Volume']), float(vix_val), float(tnx_val)))
             conn.commit()
 
     def get_historical_data(self):
-        """Returns history up to yesterday. Today's data should be fetched separately as it's incomplete."""
         now = datetime.now(tz.gettz("America/New_York"))
         today_str = now.strftime('%Y-%m-%d')
         
         with sqlite3.connect(self.db_path) as conn:
-            # Get everything strictly before today
             query = "SELECT * FROM spy_daily WHERE date < ? ORDER BY date ASC"
             df = pd.read_sql_query(query, conn, params=(today_str,))
             
-        # Convert to list of dicts required by genome
         history = []
         for _, row in df.iterrows():
             history.append({
@@ -77,23 +94,29 @@ class DataManager:
                 "high": row['high'],
                 "low": row['low'],
                 "close": row['close'],
-                "volume": row['volume']
+                "volume": row['volume'],
+                "vix": row['vix'],
+                "yield_curve": row['yield_curve']
             })
         return history
 
     def get_todays_price(self):
-        """Gets today's intraday data (the unclosed candle)."""
+        """Gets today's intraday data including macro indicators."""
         spy = yf.Ticker("SPY")
         df = spy.history(period="1d", interval="1m")
         if df.empty:
             return None
             
-        # Aggregate the intraday data into a single day candle
+        vix = yf.Ticker("^VIX").fast_info['last_price']
+        tnx = yf.Ticker("^TNX").fast_info['last_price']
+            
         return {
             "date": df.index[-1].strftime('%Y-%m-%d'),
             "open": float(df['Open'].iloc[0]),
             "high": float(df['High'].max()),
             "low": float(df['Low'].min()),
-            "close": float(df['Close'].iloc[-1]), # Current mid-price
-            "volume": int(df['Volume'].sum())
+            "close": float(df['Close'].iloc[-1]),
+            "volume": int(df['Volume'].sum()),
+            "vix": float(vix),
+            "yield_curve": float(tnx)
         }
