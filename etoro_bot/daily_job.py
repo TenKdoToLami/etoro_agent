@@ -28,7 +28,7 @@ def log_portfolio_state(etoro_api, prefix=""):
     except Exception as e:
         logger.error(f"Failed to log portfolio state: {e}")
 
-def main():
+def main(force=False):
     logger.info("--- Starting Daily eToro V9 Intra Job ---")
     
     if not ETORO_USER_KEY or ETORO_USER_KEY == "your_agent_portfolio_user_token_here":
@@ -37,7 +37,7 @@ def main():
 
     data_manager = DataManager()
     
-    if not data_manager.is_market_open_today():
+    if not data_manager.is_market_open_today() and not force:
         logger.info("Market is not open or data not available for today. Exiting.")
         return
         
@@ -50,8 +50,12 @@ def main():
         todays_data = data_manager.get_todays_price()
         
         if not todays_data:
-            logger.error("Failed to fetch today's data. Exiting.")
-            return
+            if force and history:
+                logger.info("Using last historical candle as mock for today's price (FORCE mode).")
+                todays_data = history[-1]
+            else:
+                logger.error("Failed to fetch today's data. Exiting.")
+                return
             
         logger.info(f"Loaded {len(history)} days of history. Today's SPY mid-price: {todays_data['close']}")
         

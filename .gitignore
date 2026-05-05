@@ -3,3 +3,5 @@
 trades.log*
 __pycache__/
 *.pyc
+
+scratch/*

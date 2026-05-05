@@ -7,7 +7,7 @@ import json
 import time
 from pathlib import Path
 
-from ..strategy.v9_intra import GenomeV9Intra
+from ..strategy import GenomeV9Intra
 from ..config import STATE_TO_SYMBOL, SAFETY_CASH, MIN_POSITION_VALUE, GENOME_PATH
 from .etoro import EtoroAPI
 from ..utils.logger import setup_logger

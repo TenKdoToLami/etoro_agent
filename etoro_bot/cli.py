@@ -8,9 +8,6 @@ from .config import ETORO_USER_KEY, ETORO_API_KEY
 from .daily_job import main as run_daily_job
 
 def get_api():
-    if not ETORO_USER_KEY or ETORO_USER_KEY == "your_agent_portfolio_user_token_here":
-        print("Error: ETORO_USER_KEY not set in .env")
-        sys.exit(1)
     return EtoroAPI(api_key=ETORO_API_KEY, user_key=ETORO_USER_KEY)
 
 def main():
@@ -30,7 +27,8 @@ def main():
     sell_parser = subparsers.add_parser("sell", help="Close a position")
     sell_parser.add_argument("--id", type=str, required=True, help="Position ID to close")
     
-    subparsers.add_parser("run-job", help="Execute the daily trading job manually")
+    run_job_parser = subparsers.add_parser("run-job", help="Execute the daily trading job manually")
+    run_job_parser.add_argument("--force", action="store_true", help="Force run even if market is closed")
     
     args = parser.parse_args()
     
@@ -84,7 +82,7 @@ def main():
             print(f"Failed to close position: {e}")
             
     elif args.command == "run-job":
-        run_daily_job()
+        run_daily_job(force=args.force)
         
     else:
         parser.print_help()

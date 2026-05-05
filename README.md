@@ -91,7 +91,7 @@ etoro_agent/
 │   │   ├── market.py    # yfinance fetching
 │   │   └── portfolio.py # Portfolio snapshots
 │   ├── strategy/        # Neural-net logic
-│   │   ├── v9_intra.py
+│   │   ├── genome_v9_intra.py
 │   │   └── indicators.py
 │   └── utils/           # Utilities
 │       └── logger.py
