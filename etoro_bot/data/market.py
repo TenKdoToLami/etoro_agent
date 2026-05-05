@@ -63,19 +63,24 @@ class DataManager:
         spy_df = yf.Ticker("SPY").history(period=period)
         vix_df = yf.Ticker("^VIX").history(period=period)
         tnx_df = yf.Ticker("^TNX").history(period=period) # 10Y Yield
+        irx_df = yf.Ticker("^IRX").history(period=period) # 3M Yield
         
         with sqlite3.connect(self.db_path) as conn:
             for date, row in spy_df.iterrows():
                 date_str = date.strftime('%Y-%m-%d')
                 
-                # Align VIX and TNX
+                # Align VIX and Spread
                 vix_val = vix_df.loc[date]['Close'] if date in vix_df.index else 15.0
+                
+                # Yield Curve Spread (10Y - 3M)
                 tnx_val = tnx_df.loc[date]['Close'] if date in tnx_df.index else 0.0
+                irx_val = irx_df.loc[date]['Close'] if date in irx_df.index else 0.0
+                spread = tnx_val - irx_val
                 
                 conn.execute('''
                     INSERT OR REPLACE INTO spy_daily (date, open, high, low, close, volume, vix, yield_curve)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                ''', (date_str, row['Open'], row['High'], row['Low'], row['Close'], int(row['Volume']), float(vix_val), float(tnx_val)))
+                ''', (date_str, row['Open'], row['High'], row['Low'], row['Close'], int(row['Volume']), float(vix_val), float(spread)))
             conn.commit()
 
     def get_historical_data(self):
@@ -109,6 +114,8 @@ class DataManager:
             
         vix = yf.Ticker("^VIX").fast_info['last_price']
         tnx = yf.Ticker("^TNX").fast_info['last_price']
+        irx = yf.Ticker("^IRX").fast_info['last_price']
+        spread = tnx - irx
             
         return {
             "date": df.index[-1].strftime('%Y-%m-%d'),
@@ -118,5 +125,5 @@ class DataManager:
             "close": float(df['Close'].iloc[-1]),
             "volume": int(df['Volume'].sum()),
             "vix": float(vix),
-            "yield_curve": float(tnx)
+            "yield_curve": float(spread)
         }
