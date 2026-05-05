@@ -54,6 +54,12 @@ class EtoroAPI:
         }
         return self._request("POST", "/trading/execution/market-open-orders/by-amount", json=payload)
 
-    def close_position(self, position_id, units_to_deduct=None):
-        payload = {"UnitsToDeduct": units_to_deduct} if units_to_deduct else {"UnitsToDeduct": None}
+    def close_position(self, position_id, instrument_id, units_to_deduct=None):
+        payload = {
+            "InstrumentId": instrument_id,
+            "UnitsToDeduct": units_to_deduct if units_to_deduct else None
+        }
         return self._request("POST", f"/trading/execution/market-close-orders/positions/{position_id}", json=payload)
+
+    def cancel_order(self, order_id):
+        return self._request("DELETE", f"/trading/execution/market-open-orders/{order_id}")

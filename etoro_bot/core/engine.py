@@ -88,14 +88,13 @@ class TradingLogic:
             if pos.get("instrumentID") != target_instrument_id:
                 positions_to_close.append(pos.get("positionID"))
 
-        if positions_to_close:
-            logger.info(
-                f"State changed — closing {len(positions_to_close)} position(s)."
-            )
-            for pid in positions_to_close:
-                logger.info(f"  Closing positionID {pid}")
-                self.etoro.close_position(pid)
-                time.sleep(4)  # rate-limit spacing
+            for pos_to_close in manual_positions:
+                if pos_to_close.get("instrumentID") != target_instrument_id:
+                    pid = pos_to_close.get("positionID")
+                    iid = pos_to_close.get("instrumentID")
+                    logger.info(f"  Closing positionID {pid} (InstrumentID {iid})")
+                    self.etoro.close_position(pid, iid)
+                    time.sleep(4)  # rate-limit spacing
 
             logger.info(
                 "Waiting 60 s for eToro PnL cache to refresh after closes…"
