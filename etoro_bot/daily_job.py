@@ -28,8 +28,8 @@ def log_portfolio_state(etoro_api, prefix=""):
     except Exception as e:
         logger.error(f"Failed to log portfolio state: {e}")
 
-def main(force=False):
-    logger.info("--- Starting Daily eToro V9 Intra Job ---")
+def main(force=False, dry_run=False):
+    logger.info("--- Starting Daily eToro Job ---")
     
     if not ETORO_USER_KEY or ETORO_USER_KEY == "your_agent_portfolio_user_token_here":
         logger.error("ETORO_USER_KEY is not set. Please configure .env file.")
@@ -66,11 +66,17 @@ def main(force=False):
         # 3. Log initial state
         log_portfolio_state(etoro_api, prefix="[BEFORE]")
         
-        # 4. Target State
-        target_state = trading_logic.get_target_state(history, todays_data)
+        # 4. Target Decision
+        target_weights, regime, should_rebalance, reason = trading_logic.get_target_decision(history, todays_data)
+        logger.info(f"Strategy Decision: should_rebalance={should_rebalance} | Reason: {reason}")
+        logger.info(f"Target Weights: {target_weights} (Regime: {regime})")
         
         # 5. Execute
-        trading_logic.execute_trades(target_state)
+        if should_rebalance or force:
+            if force: logger.info("FORCE mode enabled - executing rebalance regardless of strategy decision.")
+            trading_logic.execute_rebalance(target_weights, regime, todays_data, dry_run=dry_run)
+        else:
+            logger.info("No rebalance required today.")
         
         # Wait a bit before final log
         time.sleep(5)

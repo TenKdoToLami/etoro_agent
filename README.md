@@ -1,11 +1,24 @@
-# eToro Agent — V9 Intra Daily Trading Bot
+# eToro Agent — EYEBALL (SmoothDriftStrategy V2)
 
-A standalone, modular, and professional trading bot that uses the **Genome V9 Intra-Day
-Confidence** neural-net strategy to manage an eToro Agent Portfolio.
+A standalone, modular, and professional trading bot that implements the **EYEBALL** momentum-capture strategy with drift-based rebalancing to manage an eToro Agent Portfolio.
 
-The bot runs once per trading day (typically 17:00 Prague time), evaluates
-SPY market data through the trained genome, and maps the output state
-(`CASH / SPY / 2xSPY / 3xSPY`) to real eToro positions.
+The bot runs once per trading day, evaluates SPY market data and VIX levels, and maintains a multi-asset portfolio based on the current regime (Normal or Panic).
+
+---
+
+## Strategy Specification: EYEBALL
+
+- **Two-Brain Logic**: Switches between NORMAL and PANIC modes.
+- **Normal Mode (VIX < 43 & No Death Cross)**: 
+    - 4x SPY: 65%
+    - 3x SPY: 35%
+- **Panic Mode (VIX >= 43 or Death Cross)**: 
+    - GOLD: 60%
+    - TLT: 25%
+    - SHY: 10%
+    - 4x SPY: 5%
+- **Drift Tolerance**: 10% tolerance band for rebalancing.
+- **Hysteresis**: 14-day wait period for maintenance rebalances.
 
 ---
 
@@ -17,7 +30,7 @@ pip install -r requirements.txt
 
 # 2. Configure
 cp .env.example .env
-# Edit .env — at minimum set ETORO_USER_KEY
+# Edit .env — set symbols and ETORO_USER_KEY
 
 # 3. Test connectivity
 python -m etoro_bot status
@@ -32,45 +45,24 @@ Run commands with `python -m etoro_bot <command>`.
 
 | Command | Description | Example |
 |---------|-------------|---------|
-| `status` | Check if the US market is open today (via yfinance) | `python -m etoro_bot status` |
-| `portfolio` | Show equity, cash, and invested totals | `python -m etoro_bot portfolio` |
+| `status` | Check if the US market is open today | `python -m etoro_bot status` |
+| `portfolio` | Show equity, cash, and weights | `python -m etoro_bot portfolio` |
 | `positions` | List all open manual positions | `python -m etoro_bot positions` |
-| `buy` | Manually open a position | `python -m etoro_bot buy --symbol SPY --amount 500` |
-| `sell` | Manually close a position by ID | `python -m etoro_bot sell --id 12345678` |
-| `run-job` | Execute the full daily trading job | `python -m etoro_bot run-job` |
+| `run-job` | Execute the daily trading job | `python -m etoro_bot run-job --dry-run` |
 
 ---
 
 ## Configuration (`.env`)
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `ETORO_API_KEY` | *(pre-filled)* | eToro platform API key (rarely changes) |
-| `ETORO_USER_KEY` | — | **Required.** Your agent-portfolio secret token |
-| `SAFETY_CASH` | `20` | USD to always keep uninvested to cover fees |
-| `MIN_POSITION_VALUE` | `40` | Minimum USD to justify opening a new position |
-| `GENOME_PATH` | `./genome.json` | Path to the V9 Intra genome JSON |
-| `SYMBOL_CASH` | `BND` | ETF to hold when strategy says CASH (bonds) |
-| `SYMBOL_SPY` | `SPY` | Symbol for the 1× state |
-| `SYMBOL_2XSPY` | `SSO` | Symbol for the 2× state |
-| `SYMBOL_3XSPY` | `UPRO` | Symbol for the 3× state |
-| `DB_PATH` | `./data.sqlite` | SQLite path for market OHLCV data |
-| `PORTFOLIO_DB_PATH` | `./portfolio.sqlite` | SQLite path for daily portfolio snapshots |
-
----
-
-## Cron Scheduling
-
-```bash
-# Install (adds 17:00 Mon–Fri cron entry)
-chmod +x scripts/install.sh && ./scripts/install.sh
-
-# Remove
-chmod +x scripts/uninstall.sh && ./scripts/uninstall.sh
-
-# Verify
-crontab -l
-```
+| Variable | Description |
+|----------|-------------|
+| `ETORO_USER_KEY` | **Required.** Your agent-portfolio secret token |
+| `SAFETY_CASH` | USD to keep uninvested to cover fees |
+| `SYMBOL_4XSPY` | Symbol for the 4x Leveraged SPY proxy |
+| `SYMBOL_3XSPY` | Symbol for the 3x Leveraged SPY proxy |
+| `SYMBOL_GOLD` | Symbol for Gold (GLD) |
+| `SYMBOL_TLT` | Symbol for Long-Term Bonds (TLT) |
+| `SYMBOL_SHY` | Symbol for Short-Term Bonds (SHY) |
 
 ---
 
@@ -79,26 +71,24 @@ crontab -l
 ```
 etoro_agent/
 ├── etoro_bot/           # Main Python package
-│   ├── __init__.py
 │   ├── __main__.py      # python -m etoro_bot entry point
 │   ├── cli.py           # CLI logic
 │   ├── config.py        # Config loader
 │   ├── daily_job.py     # Task orchestration
 │   ├── core/            # Business logic
-│   │   ├── engine.py    # Trading logic
+│   │   ├── engine.py    # Rebalancing engine
 │   │   └── etoro.py     # eToro API client
 │   ├── data/            # Data management
 │   │   ├── market.py    # yfinance fetching
-│   │   └── portfolio.py # Portfolio snapshots
-│   ├── strategy/        # Neural-net logic
-│   │   ├── genome_v9_intra.py
+│   │   └── portfolio.py # Snapshots & Logs
+│   ├── strategy/        # Strategy logic
+│   │   ├── eyeball.py   # EYEBALL implementation
 │   │   └── indicators.py
 │   └── utils/           # Utilities
 │       └── logger.py
 ├── scripts/             # Management scripts
 │   ├── install.sh
 │   └── uninstall.sh
-├── genome.json
 ├── requirements.txt
 ├── .env.example
 ├── .gitignore

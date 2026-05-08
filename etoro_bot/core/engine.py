@@ -1,130 +1,179 @@
-"""
-Core trading logic: evaluates the V9 Intra strategy against market data
-and translates state transitions into eToro trades.
-"""
-
-import json
+from datetime import datetime, timedelta
 import time
-from pathlib import Path
-
-from ..strategy import GenomeV9Intra
-from ..config import STATE_TO_SYMBOL, SAFETY_CASH, MIN_POSITION_VALUE, GENOME_PATH
+from ..strategy.eyeball import EyeballStrategy
+from ..config import STATE_TO_SYMBOL, SAFETY_CASH, MIN_POSITION_VALUE
 from .etoro import EtoroAPI
+from ..data.portfolio import SnapshotManager
 from ..utils.logger import setup_logger
 
 logger = setup_logger(__name__)
 
-
 class TradingLogic:
     def __init__(self, etoro_api: EtoroAPI):
         self.etoro = etoro_api
-        self.genome_path = Path(GENOME_PATH)
+        self.snapshot_manager = SnapshotManager()
 
-    # ------------------------------------------------------------------
-    # Strategy evaluation
-    # ------------------------------------------------------------------
-    def get_target_state(self, historical_data, todays_data):
-        """Feed all historical candles + today's intraday candle through the
-        neural-net strategy and return the symbolic target state
-        (e.g. ``"CASH"``, ``"SPY"``, ``"2xSPY"``, ``"3xSPY"``)."""
-
-        with open(self.genome_path, 'r') as f:
-            genome = json.load(f)
-
-        strategy = GenomeV9Intra(genome)
-
-        # Replay history to warm up indicators
-        prev_data = None
-        for day_data in historical_data:
-            strategy.on_data(day_data['date'], day_data, prev_data)
-            strategy.update_history(day_data)
-            prev_data = day_data
-
-        # Evaluate today
-        target_holdings, telemetry = strategy.on_data(
-            todays_data['date'], todays_data, prev_data
-        )
-
-        # holdings is e.g. {"SPY": 1.0} or {"CASH": 1.0}
-        target_state = list(target_holdings.keys())[0]
-        logger.info(f"Target state: {target_state}  |  Telemetry: {telemetry}")
-        return target_state
-
-    # ------------------------------------------------------------------
-    # Trade execution
-    # ------------------------------------------------------------------
-    def execute_trades(self, target_state):
-        """Compare the current eToro portfolio against *target_state* and
-        execute the minimum set of trades to converge."""
-
+    def get_portfolio_weights(self):
+        """Calculates current weights of assets in the portfolio."""
         pnl = self.etoro.get_pnl()
         client_portfolio = pnl.get("clientPortfolio", {})
-
-        available_cash = client_portfolio.get("credit", 0.0)
+        
+        credit = client_portfolio.get("credit", 0.0)
         positions = client_portfolio.get("positions", [])
-        orders_for_open = client_portfolio.get("ordersForOpen", [])
-
-        # Deduct pending manual orders from available cash
-        for order in orders_for_open:
-            if order.get("mirrorID") == 0:
-                available_cash -= order.get("amount", 0.0)
-
-        # Collect manual (non-mirror) positions only
+        
+        # We only care about manual positions
         manual_positions = [p for p in positions if p.get("mirrorID", 0) == 0]
+        
+        total_invested = sum(p.get("amount", 0.0) for p in manual_positions)
+        unrealized_pnl = sum(p.get("unrealizedPnL", {}).get("pnL", 0.0) for p in manual_positions)
+        equity = credit + total_invested + unrealized_pnl
+        
+        if equity <= 0:
+            return {}, 0
+            
+        weights = {}
+        # Reverse map symbols back to our keys (e.g., UPRO -> 3xSPY)
+        SYMBOL_TO_STATE = {v: k for k, v in STATE_TO_SYMBOL.items()}
+        
+        # Resolve instrument IDs to symbols to map back to state
+        # (Actually, we should probably store the instrument IDs in config or cache them)
+        
+        for pos in manual_positions:
+            # We'll use instrumentID and resolve it or use the 'displaySymbol' if available in get_pnl
+            # get_pnl positions usually have instrumentID. 
+            # For now, let's assume we can map them.
+            # In a real eToro agent, we'd have a mapping table.
+            
+            # Let's try to find the symbol for this instrumentID
+            # This is slow if we call resolve_instrument for every position.
+            # Better to cache it.
+            symbol = pos.get("displaySymbol") # eToro API often includes this
+            state_key = SYMBOL_TO_STATE.get(symbol, "OTHER")
+            
+            pos_value = pos.get("amount", 0.0) + pos.get("unrealizedPnL", {}).get("pnL", 0.0)
+            weights[state_key] = weights.get(state_key, 0.0) + (pos_value / equity)
+            
+        weights["CASH"] = credit / equity
+        return weights, equity
 
-        # Resolve target symbol — every state maps to a tradeable symbol
-        # (CASH maps to the bonds ETF configured in .env)
-        target_symbol = STATE_TO_SYMBOL.get(target_state, "BND")
-        target_instrument_id = self.etoro.resolve_instrument(target_symbol)
+    def get_target_decision(self, historical_data, todays_data):
+        """
+        Evaluates the Eyeball strategy and decides if a rebalance is needed.
+        Returns (target_weights, regime, should_rebalance, reason)
+        """
+        strategy = EyeballStrategy()
+        target_weights, telemetry = strategy.on_data(todays_data, historical_data)
+        regime = telemetry['regime']
+        
+        # 1. Check for regime change
+        last_date, last_weights, last_regime = self.snapshot_manager.get_last_rebalance()
+        
+        if last_regime is None or regime != last_regime:
+            return target_weights, regime, True, f"Regime change: {last_regime} -> {regime}"
+            
+        # 2. Within same regime: Check Hysteresis (14 days)
+        if last_date:
+            last_dt = datetime.strptime(last_date, '%Y-%m-%d')
+            today_dt = datetime.strptime(todays_data['date'], '%Y-%m-%d')
+            if (today_dt - last_dt).days < 14:
+                return target_weights, regime, False, f"Hysteresis active ({(today_dt - last_dt).days} days since last trade)"
 
-        logger.info(
-            f"Manual positions: {len(manual_positions)} | "
-            f"Target: {target_symbol} (instrumentID={target_instrument_id})"
-        )
+        # 3. Check Tolerance Band (10%)
+        current_weights, equity = self.get_portfolio_weights()
+        max_drift = 0
+        all_assets = set(list(target_weights.keys()) + list(current_weights.keys()))
+        if "CASH" in all_assets: all_assets.remove("CASH")
+        if "OTHER" in all_assets: all_assets.remove("OTHER")
+        
+        for asset in all_assets:
+            tw = target_weights.get(asset, 0.0)
+            cw = current_weights.get(asset, 0.0)
+            drift = abs(cw - tw)
+            if drift > max_drift:
+                max_drift = drift
+                
+        if max_drift > strategy.TOLERANCE_BAND:
+            return target_weights, regime, True, f"Drift threshold exceeded ({max_drift*100:.1f}%)"
+            
+        return target_weights, regime, False, "No rebalance needed"
 
-        # ---- Identify positions to close ----
-        positions_to_close = [p for p in manual_positions if p.get("instrumentID") != target_instrument_id]
-        is_target_already_owned = any(p.get("instrumentID") == target_instrument_id for p in manual_positions)
-
-        if not positions_to_close and is_target_already_owned:
-            logger.info(f"Target asset {target_symbol} already owned and no other positions to close. Holding.")
+    def execute_rebalance(self, target_weights, regime, todays_data, dry_run=False):
+        """
+        Executes trades to reach target weights.
+        """
+        logger.info(f"Executing rebalance to target weights: {target_weights} (Regime: {regime})")
+        
+        current_weights, equity = self.get_portfolio_weights()
+        investable_equity = equity - SAFETY_CASH
+        
+        if investable_equity <= 0:
+            logger.warning("Insufficient equity to rebalance.")
             return
 
-        if positions_to_close:
-            logger.info(f"State changed — closing {len(positions_to_close)} position(s).")
-            for pos in positions_to_close:
-                pid = pos.get("positionID")
-                iid = pos.get("instrumentID")
-                logger.info(f"  Closing positionID {pid} (InstrumentID {iid})")
-                self.etoro.close_position(pid, iid)
-                time.sleep(2) # Short gap between individual close commands
+        # Simple execution strategy for eToro:
+        # 1. Close all positions that are NOT in target or need substantial reduction
+        # 2. Open new positions to match target amounts
+        
+        pnl = self.etoro.get_pnl()
+        positions = pnl.get("clientPortfolio", {}).get("positions", [])
+        manual_positions = [p for p in positions if p.get("mirrorID", 0) == 0]
+        
+        # Group positions by symbol
+        for pos in manual_positions:
+            symbol = pos.get("displaySymbol")
+            pid = pos.get("positionID")
+            iid = pos.get("instrumentID")
+            
+            # If symbol not in target weights, close it
+            SYMBOL_TO_STATE = {v: k for k, v in STATE_TO_SYMBOL.items()}
+            state_key = SYMBOL_TO_STATE.get(symbol)
+            
+            if state_key not in target_weights:
+                logger.info(f"Closing position {pid} for {symbol} (not in target)")
+                if not dry_run:
+                    self.etoro.close_position(pid, iid)
+                    time.sleep(2)
+            else:
+                # If it's in target, we might want to close it and reopen to reset weight,
+                # or keep it if we are just adding.
+                # To keep it simple and ensure exact weights, we'll close everything 
+                # and reopen. (Warning: this has spread costs, but ensures accuracy on eToro)
+                # Alternative: only close if cw > tw + tolerance.
+                logger.info(f"Closing position {pid} for {symbol} to reset weight")
+                if not dry_run:
+                    self.etoro.close_position(pid, iid)
+                    time.sleep(2)
 
-            logger.info("Waiting 60 s for eToro PnL cache to refresh after closes…")
+        if not dry_run:
+            logger.info("Waiting for eToro PnL cache to refresh...")
             time.sleep(60)
-
-            # Refresh cash balance after waiting
+            # Refresh equity after closes
             pnl = self.etoro.get_pnl()
             available_cash = pnl.get("clientPortfolio", {}).get("credit", 0.0)
-            
-            # Re-deduct pending orders after refresh
-            orders_for_open = pnl.get("clientPortfolio", {}).get("ordersForOpen", [])
-            for order in orders_for_open:
-                if order.get("mirrorID") == 0:
-                    available_cash -= order.get("amount", 0.0)
-
-        # ---- Open new position with surplus cash ----
-        investable_cash = available_cash - SAFETY_CASH
-
-        if investable_cash > MIN_POSITION_VALUE:
-            logger.info(f"Opening position: {target_symbol}  |  amount=${investable_cash:.2f}")
-            self.etoro.open_position(
-                instrument_id=target_instrument_id,
-                amount=investable_cash,
-                is_buy=True,
-                leverage=1,
-            )
+            investable_cash = available_cash - SAFETY_CASH
         else:
-            logger.info(
-                f"Investable cash ${investable_cash:.2f} is below "
-                f"MIN_POSITION_VALUE ${MIN_POSITION_VALUE}. Holding."
-            )
+            investable_cash = investable_equity # Mock
+
+        # Open new positions
+        for state_key, weight in target_weights.items():
+            amount = investable_cash * (weight / sum(target_weights.values())) # Normalize weights
+            symbol = STATE_TO_SYMBOL.get(state_key)
+            if not symbol:
+                logger.error(f"No symbol found for state: {state_key}")
+                continue
+                
+            if amount > MIN_POSITION_VALUE:
+                logger.info(f"Opening position: {symbol} | Amount: ${amount:.2f}")
+                if not dry_run:
+                    try:
+                        iid = self.etoro.resolve_instrument(symbol)
+                        self.etoro.open_position(iid, amount)
+                        time.sleep(2)
+                    except Exception as e:
+                        logger.error(f"Failed to open position for {symbol}: {e}")
+            else:
+                logger.info(f"Amount ${amount:.2f} for {symbol} is below MIN_POSITION_VALUE. Skipping.")
+
+        # Log the rebalance
+        if not dry_run:
+            self.snapshot_manager.log_rebalance(todays_data['date'], target_weights, regime)

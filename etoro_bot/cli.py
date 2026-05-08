@@ -47,6 +47,7 @@ def main():
     
     run_job_parser = subparsers.add_parser("run-job", help="Execute the daily trading job manually")
     run_job_parser.add_argument("--force", action="store_true", help="Force run even if market is closed")
+    run_job_parser.add_argument("--dry-run", action="store_true", help="Log intended trades without executing them")
     
     args = parser.parse_args()
     
@@ -157,7 +158,7 @@ def main():
             print(f"Error fetching price for {args.symbol}: {e}")
             
     elif args.command == "run-job":
-        run_daily_job(force=args.force)
+        run_daily_job(force=args.force, dry_run=args.dry_run)
         
     else:
         parser.print_help()
