@@ -20,8 +20,7 @@ class DataManager:
                     low REAL,
                     close REAL,
                     volume INTEGER,
-                    vix REAL,
-                    yield_curve REAL
+                    vix REAL
                 )
             ''')
             # Migration: Check if vix column exists, if not add it
@@ -30,7 +29,6 @@ class DataManager:
             columns = [info[1] for info in cursor.fetchall()]
             if 'vix' not in columns:
                 conn.execute('ALTER TABLE spy_daily ADD COLUMN vix REAL DEFAULT 15.0')
-                conn.execute('ALTER TABLE spy_daily ADD COLUMN yield_curve REAL DEFAULT 0.0')
             conn.commit()
 
     def is_market_open_today(self):
@@ -58,12 +56,10 @@ class DataManager:
         
         from ..utils.logger import setup_logger
         logger = setup_logger("market_data")
-        logger.info(f"Updating historical data (SPY, VIX, TNX) for period: {period}")
+        logger.info(f"Updating historical data (SPY, VIX) for period: {period}")
 
         spy_df = yf.Ticker("SPY").history(period=period)
         vix_df = yf.Ticker("^VIX").history(period=period)
-        tnx_df = yf.Ticker("^TNX").history(period=period) # 10Y Yield
-        irx_df = yf.Ticker("^IRX").history(period=period) # 3M Yield
         
         with sqlite3.connect(self.db_path) as conn:
             for date, row in spy_df.iterrows():
@@ -72,15 +68,10 @@ class DataManager:
                 # Align VIX and Spread
                 vix_val = vix_df.loc[date]['Close'] if date in vix_df.index else 15.0
                 
-                # Yield Curve Spread (10Y - 3M)
-                tnx_val = tnx_df.loc[date]['Close'] if date in tnx_df.index else 0.0
-                irx_val = irx_df.loc[date]['Close'] if date in irx_df.index else 0.0
-                spread = tnx_val - irx_val
-                
                 conn.execute('''
-                    INSERT OR REPLACE INTO spy_daily (date, open, high, low, close, volume, vix, yield_curve)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                ''', (date_str, row['Open'], row['High'], row['Low'], row['Close'], int(row['Volume']), float(vix_val), float(spread)))
+                    INSERT OR REPLACE INTO spy_daily (date, open, high, low, close, volume, vix)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                ''', (date_str, row['Open'], row['High'], row['Low'], row['Close'], int(row['Volume']), float(vix_val)))
             conn.commit()
 
     def get_historical_data(self):
@@ -100,8 +91,7 @@ class DataManager:
                 "low": row['low'],
                 "close": row['close'],
                 "volume": row['volume'],
-                "vix": row['vix'],
-                "yield_curve": row['yield_curve']
+                "vix": row['vix']
             })
         return history
 
@@ -111,11 +101,7 @@ class DataManager:
         df = spy.history(period="1d", interval="1m")
         if df.empty:
             return None
-            
         vix = yf.Ticker("^VIX").fast_info['last_price']
-        tnx = yf.Ticker("^TNX").fast_info['last_price']
-        irx = yf.Ticker("^IRX").fast_info['last_price']
-        spread = tnx - irx
             
         return {
             "date": df.index[-1].strftime('%Y-%m-%d'),
@@ -124,6 +110,5 @@ class DataManager:
             "low": float(df['Low'].min()),
             "close": float(df['Close'].iloc[-1]),
             "volume": int(df['Volume'].sum()),
-            "vix": float(vix),
-            "yield_curve": float(spread)
+            "vix": float(vix)
         }
