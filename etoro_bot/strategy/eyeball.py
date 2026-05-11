@@ -6,14 +6,15 @@ from ..config import VIX_THRESHOLD, REBALANCE_INTERVAL_DAYS
 class EyeballStrategy:
     NAME = "EYEBALL (SmoothDriftStrategy V3)"
     
-    # Target Weights — Bullish: equal-weight leveraged ETFs
+    # Target Weights — Bullish: equal-weight leveraged ETFs (~5% cash buffer)
     BULLISH_WEIGHTS = {
-        "SPYU": 0.16,
-        "UPRO": 0.16,
-        "TECL": 0.16,
-        "TNA": 0.16,
-        "TQQQ": 0.16,
-        "UDOW": 0.16,
+        "SPYU": 0.135,
+        "UPRO": 0.135,
+        "TECL": 0.135,
+        "TNA": 0.135,
+        "TQQQ": 0.135,
+        "UDOW": 0.135,
+        "SOXL": 0.135,
     }
     
     # Panic: safe-haven allocation

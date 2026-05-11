@@ -24,6 +24,7 @@ SYMBOL_TECL = os.getenv("SYMBOL_TECL", "TECL")
 SYMBOL_TNA = os.getenv("SYMBOL_TNA", "TNA")
 SYMBOL_TQQQ = os.getenv("SYMBOL_TQQQ", "TQQQ")
 SYMBOL_UDOW = os.getenv("SYMBOL_UDOW", "UDOW")
+SYMBOL_SOXL = os.getenv("SYMBOL_SOXL", "SOXL")
 
 # Panic symbols (safe havens)
 SYMBOL_GOLD = os.getenv("SYMBOL_GOLD", "GOLD")
@@ -45,6 +46,7 @@ STATE_TO_SYMBOL = {
     "TNA": SYMBOL_TNA,
     "TQQQ": SYMBOL_TQQQ,
     "UDOW": SYMBOL_UDOW,
+    "SOXL": SYMBOL_SOXL,
     # Panic assets
     "GOLD": SYMBOL_GOLD,
     "TLT": SYMBOL_TLT,
