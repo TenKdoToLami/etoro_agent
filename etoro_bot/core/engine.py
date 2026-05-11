@@ -32,21 +32,10 @@ class TradingLogic:
             return {}, 0
             
         weights = {}
-        # Reverse map symbols back to our keys (e.g., UPRO -> 3xSPY)
+        # Reverse map symbols back to our keys (e.g., UPRO -> UPRO)
         SYMBOL_TO_STATE = {v: k for k, v in STATE_TO_SYMBOL.items()}
         
-        # Resolve instrument IDs to symbols to map back to state
-        # (Actually, we should probably store the instrument IDs in config or cache them)
-        
         for pos in manual_positions:
-            # We'll use instrumentID and resolve it or use the 'displaySymbol' if available in get_pnl
-            # get_pnl positions usually have instrumentID. 
-            # For now, let's assume we can map them.
-            # In a real eToro agent, we'd have a mapping table.
-            
-            # Let's try to find the symbol for this instrumentID
-            # This is slow if we call resolve_instrument for every position.
-            # Better to cache it.
             symbol = pos.get("displaySymbol") # eToro API often includes this
             state_key = SYMBOL_TO_STATE.get(symbol, "OTHER")
             
@@ -59,42 +48,42 @@ class TradingLogic:
     def get_target_decision(self, historical_data, todays_data):
         """
         Evaluates the Eyeball strategy and decides if a rebalance is needed.
+        
+        Rebalance logic:
+          - Regime change (PANIC <-> BULLISH) → always rebalance
+          - In BULLISH mode → rebalance every N trading days (default 20)
+          - In PANIC mode → only rebalance on regime change (no periodic)
+        
         Returns (target_weights, regime, should_rebalance, reason)
         """
         strategy = EyeballStrategy()
         target_weights, telemetry = strategy.on_data(todays_data, historical_data)
         regime = telemetry['regime']
         
-        # 1. Check for regime change
+        # 1. Check for regime change → always rebalance
         last_date, last_weights, last_regime = self.snapshot_manager.get_last_rebalance()
         
-        if last_regime is None or regime != last_regime:
+        if last_regime is None:
+            return target_weights, regime, True, "Initial rebalance (no prior state)"
+        
+        if regime != last_regime:
             return target_weights, regime, True, f"Regime change: {last_regime} -> {regime}"
-            
-        # 2. Within same regime: Check Hysteresis (14 days)
+        
+        # 2. In PANIC mode, do NOT periodic-rebalance — only regime flip triggers trades
+        if regime == "PANIC":
+            return target_weights, regime, False, "PANIC mode — holding until regime flips to BULLISH"
+        
+        # 3. In BULLISH mode, rebalance every REBALANCE_DAYS trading days
         if last_date:
             last_dt = datetime.strptime(last_date, '%Y-%m-%d')
             today_dt = datetime.strptime(todays_data['date'], '%Y-%m-%d')
-            if (today_dt - last_dt).days < 14:
-                return target_weights, regime, False, f"Hysteresis active ({(today_dt - last_dt).days} days since last trade)"
-
-        # 3. Check Tolerance Band (10%)
-        current_weights, equity = self.get_portfolio_weights()
-        max_drift = 0
-        all_assets = set(list(target_weights.keys()) + list(current_weights.keys()))
-        if "CASH" in all_assets: all_assets.remove("CASH")
-        if "OTHER" in all_assets: all_assets.remove("OTHER")
-        
-        for asset in all_assets:
-            tw = target_weights.get(asset, 0.0)
-            cw = current_weights.get(asset, 0.0)
-            drift = abs(cw - tw)
-            if drift > max_drift:
-                max_drift = drift
-                
-        if max_drift > strategy.TOLERANCE_BAND:
-            return target_weights, regime, True, f"Drift threshold exceeded ({max_drift*100:.1f}%)"
+            days_since = (today_dt - last_dt).days
             
+            if days_since >= strategy.REBALANCE_DAYS:
+                return target_weights, regime, True, f"Periodic {strategy.REBALANCE_DAYS}-day rebalance ({days_since} days since last trade)"
+            else:
+                return target_weights, regime, False, f"Next rebalance in {strategy.REBALANCE_DAYS - days_since} days ({days_since}/{strategy.REBALANCE_DAYS})"
+
         return target_weights, regime, False, "No rebalance needed"
 
     def execute_rebalance(self, target_weights, regime, todays_data, dry_run=False):
@@ -134,11 +123,7 @@ class TradingLogic:
                     self.etoro.close_position(pid, iid)
                     time.sleep(2)
             else:
-                # If it's in target, we might want to close it and reopen to reset weight,
-                # or keep it if we are just adding.
-                # To keep it simple and ensure exact weights, we'll close everything 
-                # and reopen. (Warning: this has spread costs, but ensures accuracy on eToro)
-                # Alternative: only close if cw > tw + tolerance.
+                # Close and reopen to reset exact weights
                 logger.info(f"Closing position {pid} for {symbol} to reset weight")
                 if not dry_run:
                     self.etoro.close_position(pid, iid)
